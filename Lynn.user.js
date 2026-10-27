@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         🌸 Lynn
 // @namespace    https://crack.wrtn.ai/
-// @version      1.0.0
+// @version      1.0.1
 // @updateURL    https://raw.githubusercontent.com/rkdskaaldls/lynn/main/Lynn.user.js
 // @downloadURL  https://raw.githubusercontent.com/rkdskaaldls/lynn/main/Lynn.user.js
 // @match        *://crack.wrtn.ai/*
@@ -28,6 +28,8 @@
     toggleLineBreak: 'lynn-toggle-line-break',
     toggleChrome: 'lynn-toggle-chrome',
     toggleBars: 'lynn-toggle-bars',
+    toggleSearchAutofill: 'lynn-toggle-search-autofill',
+    toggleCrackModel: 'lynn-toggle-crack-model',
     chromeTop: 'lynn-chrome-top',
     visibleModelDisclosure: 'lynn-visible-model-disclosure',
     visibleModelPanel: 'lynn-visible-model-panel',
@@ -46,6 +48,8 @@
     lineBreak: 'lynn_line_break_optimize',
     chromeHover: 'lynn_chrome_hover',
     barsHover: 'lynn_bars_hover',
+    searchAutofill: 'lynn_block_search_autofill',
+    crackModel: 'lynn_hide_crack_model',
     visibleModels: 'lynn_visible_models',
     registry: 'lynn_model_registry',
     visibleOpen: 'lynn_visible_models_open',
@@ -172,7 +176,174 @@
   let lineBreakOptimize = loadFlag(LS.lineBreak, LEGACY.lineBreak, true);
   let chromeHover = loadFlag(LS.chromeHover, '', true);
   let barsHover = loadFlag(LS.barsHover, '', true);
+  let blockSearchAutofill = loadFlag(LS.searchAutofill, '', true);
+  let hideCrackModel = loadFlag(LS.crackModel, '', true);
   let visibleModelListOpen = readOwnOrLegacy(LS.visibleOpen, LEGACY.visibleOpen) !== '0';
+
+  function isCrackSite() {
+    return location.hostname === 'crack.wrtn.ai';
+  }
+
+  function isSearchField(el) {
+    if (!(el instanceof HTMLInputElement) || el.ownerDocument !== document) return false;
+    if (el.closest('[id^="lynn-"]')) return false;
+    if (el.dataset.lynnNoFill === '1') return true;
+    const type = (el.getAttribute('type') || 'text').toLowerCase();
+    if (type === 'hidden' || type === 'checkbox' || type === 'radio' || type === 'button' || type === 'submit' || type === 'file') return false;
+    const hint = `${el.getAttribute('placeholder') || ''} ${el.getAttribute('aria-label') || ''}`;
+    const role = (el.getAttribute('role') || '').toLowerCase();
+    const looksSearch = type === 'search' || role === 'searchbox' || (role === 'combobox' && hint.includes('검색')) || hint.includes('검색') || !!el.closest('[role="search"]');
+    if (!looksSearch || type === 'password' || type === 'email') return false;
+    return true;
+  }
+
+  function rejectUnsolicitedSearchValue(el) {
+    if (!(el instanceof HTMLInputElement) || !el.isConnected || el.dataset.lynnNoFill !== '1') return;
+    if (el.dataset.lynnReverting === '1') return;
+    if (el.dataset.lynnLastGoodSet !== '1') {
+      el.dataset.lynnLastGoodSet = '1';
+      el.dataset.lynnLastGood = el.value || '';
+      el.dataset.lynnGuardAt = String(Date.now());
+      return;
+    }
+    if (el.dataset.lynnUserTyped === '1') {
+      el.dataset.lynnLastGood = el.value || '';
+      return;
+    }
+    const good = el.dataset.lynnLastGood || '';
+    if ((el.value || '') === good) return;
+    el.dataset.lynnReverting = '1';
+    const previous = el.value;
+    const proto = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+    if (proto?.set) proto.set.call(el, good);
+    else el.value = good;
+    if (el._valueTracker) el._valueTracker.setValue(previous);
+    el.dataset.lynnReverting = '0';
+  }
+
+  function guardSearchInput(el) {
+    if (!blockSearchAutofill || !isCrackSite() || !isSearchField(el)) return;
+    if (el.dataset.lynnNoFill !== '1') {
+      el.dataset.lynnNoFill = '1';
+      el.dataset.lynnPrevReadonly = el.hasAttribute('readonly') ? '1' : '0';
+      el.dataset.lynnPrevType = el.getAttribute('type') || 'text';
+    }
+    if ((el.getAttribute('type') || 'text').toLowerCase() !== 'search') el.setAttribute('type', 'search');
+    if (!el.getAttribute('name')) el.setAttribute('name', 'lynn-search-query');
+    if (el.getAttribute('autocomplete') !== 'new-password') el.setAttribute('autocomplete', 'new-password');
+    el.setAttribute('data-form-type', 'other');
+    el.setAttribute('data-lpignore', 'true');
+    el.setAttribute('data-1p-ignore', 'true');
+    if (document.activeElement !== el && el.dataset.lynnPrevReadonly !== '1' && !el.hasAttribute('readonly')) {
+      el.setAttribute('readonly', 'readonly');
+    }
+    rejectUnsolicitedSearchValue(el);
+  }
+
+  function releaseSearchInput(el) {
+    if (el.dataset.lynnNoFill !== '1') return;
+    if (el.dataset.lynnPrevReadonly === '1') el.setAttribute('readonly', 'readonly');
+    else el.removeAttribute('readonly');
+    if (el.dataset.lynnPrevType) el.setAttribute('type', el.dataset.lynnPrevType);
+    el.removeAttribute('data-form-type');
+    el.removeAttribute('data-lpignore');
+    el.removeAttribute('data-1p-ignore');
+    delete el.dataset.lynnNoFill;
+    delete el.dataset.lynnPrevReadonly;
+    delete el.dataset.lynnPrevType;
+    delete el.dataset.lynnLastGood;
+    delete el.dataset.lynnLastGoodSet;
+    delete el.dataset.lynnUserTyped;
+    delete el.dataset.lynnGuardAt;
+    delete el.dataset.lynnReverting;
+  }
+
+  function applySearchAutofillGuard() {
+    if (!isCrackSite()) return;
+    if (!blockSearchAutofill) {
+      document.querySelectorAll('input[data-lynn-no-fill="1"]').forEach(releaseSearchInput);
+      return;
+    }
+    document.querySelectorAll('input').forEach(guardSearchInput);
+  }
+
+  function watchSearchAutofill() {
+    if (!isCrackSite() || window.__lynnSearchNoFill) return;
+    window.__lynnSearchNoFill = true;
+
+    const guardNode = (node) => {
+      if (!blockSearchAutofill || !(node instanceof Element)) return;
+      if (node instanceof HTMLInputElement) guardSearchInput(node);
+      else node.querySelectorAll('input').forEach(guardSearchInput);
+    };
+    document.addEventListener('pointerdown', (event) => {
+      if (!blockSearchAutofill) return;
+      const el = event.target;
+      if (!(el instanceof HTMLInputElement) || document.activeElement === el || !isSearchField(el)) return;
+      guardSearchInput(el);
+    }, true);
+    const unlockSearchForTyping = (el) => {
+      if (!(el instanceof HTMLInputElement) || el.dataset.lynnNoFill !== '1') return;
+      if (el.dataset.lynnPrevReadonly !== '1') el.removeAttribute('readonly');
+      el.dataset.lynnUserTyped = '1';
+      el.dataset.lynnLastGood = el.value || '';
+    };
+    document.addEventListener('keydown', (event) => {
+      const el = event.target;
+      if (!(el instanceof HTMLInputElement) || el.dataset.lynnNoFill !== '1') return;
+      const typingKey = event.key === 'Backspace' || event.key === 'Delete' || event.key === 'Process' || event.key === 'Unidentified' || (event.key.length === 1 && !event.metaKey && !event.ctrlKey && !event.altKey);
+      if (!typingKey) return;
+      unlockSearchForTyping(el);
+    }, true);
+    document.addEventListener('compositionstart', (event) => unlockSearchForTyping(event.target), true);
+    document.addEventListener('paste', (event) => unlockSearchForTyping(event.target), true);
+    document.addEventListener('input', (event) => rejectUnsolicitedSearchValue(event.target), true);
+    document.addEventListener('focusin', (event) => {
+      const el = event.target;
+      if (!(el instanceof HTMLInputElement) || el.dataset.lynnNoFill !== '1') return;
+      if (el.dataset.lynnUserTyped === '1' || el.dataset.lynnPrevReadonly === '1') return;
+      el.setAttribute('autocomplete', 'new-password');
+      el.setAttribute('readonly', 'readonly');
+    }, true);
+    document.addEventListener('focusout', (event) => {
+      const el = event.target;
+      if (!blockSearchAutofill || !(el instanceof HTMLInputElement) || el.dataset.lynnNoFill !== '1') return;
+      if (el.dataset.lynnUserTyped === '1') el.dataset.lynnLastGood = el.value || '';
+      delete el.dataset.lynnUserTyped;
+      if (el.dataset.lynnPrevReadonly !== '1') el.setAttribute('readonly', 'readonly');
+      rejectUnsolicitedSearchValue(el);
+    }, true);
+    document.addEventListener('animationstart', (event) => {
+      if (event.animationName !== 'lynn-on-autofill') return;
+      rejectUnsolicitedSearchValue(event.target);
+    }, true);
+    setInterval(() => {
+      if (!blockSearchAutofill) return;
+      document.querySelectorAll('input[data-lynn-no-fill="1"]').forEach(rejectUnsolicitedSearchValue);
+    }, 200);
+
+    const searchObserver = new MutationObserver((mutations) => {
+      if (!blockSearchAutofill) return;
+      for (const mutation of mutations) {
+        if (mutation.type === 'attributes') {
+          guardNode(mutation.target);
+          continue;
+        }
+        mutation.addedNodes.forEach(guardNode);
+      }
+    });
+    searchObserver.observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['autocomplete', 'readonly', 'type'],
+    });
+
+    applySearchAutofillGuard();
+    document.addEventListener('DOMContentLoaded', applySearchAutofillGuard, { once: true });
+  }
+
+  watchSearchAutofill();
 
   function applyLineBreakOptimize() {
     document.documentElement.classList.toggle('lynn-line-break', lineBreakOptimize);
@@ -405,13 +576,27 @@
     return next;
   }
 
+  function isGeminiFlash(name, version) {
+    return new RegExp(`gemini\\s*3\\.${version}\\s*flash`, 'i').test(normalizeText(name));
+  }
+
+  function placeGemini38Before37(order) {
+    const newer = order.find((name) => isGeminiFlash(name, '8'));
+    const older = order.find((name) => isGeminiFlash(name, '7'));
+    if (!newer || !older) return order;
+    if (order.indexOf(newer) < order.indexOf(older)) return order;
+    const next = order.filter((name) => name !== newer);
+    next.splice(next.indexOf(older), 0, newer);
+    return next;
+  }
+
   function migrateLynnUltraChat() {
     const crack = '울트라챗 1.0';
     const hadLynn = Object.prototype.hasOwnProperty.call(CHAT_MODEL_INFO, '울트라챗') || CHAT_MODEL_ORDER.includes('울트라챗');
     const image = CHAT_MODEL_INFO[crack]?.image || CHAT_MODEL_INFO['울트라챗']?.image || '';
     delete CHAT_MODEL_INFO['울트라챗'];
     if (image) CHAT_MODEL_INFO[crack] = { image };
-    const nextOrder = placeUltraChatBelowFable(CHAT_MODEL_ORDER);
+    const nextOrder = placeGemini38Before37(placeUltraChatBelowFable(CHAT_MODEL_ORDER));
     const moved = nextOrder.some((name, index) => name !== CHAT_MODEL_ORDER[index]) || nextOrder.length !== CHAT_MODEL_ORDER.length;
     CHAT_MODEL_ORDER = nextOrder;
     CHAT_MODEL_ICON_MAP = buildChatModelIconMap(CHAT_MODEL_INFO);
@@ -714,10 +899,10 @@
     const previousOrder = [...CHAT_MODEL_ORDER];
     const menuNames = entries.map((entry) => entry.name).filter((name) => name !== '울트라챗');
     const menuSet = new Set(menuNames);
-    const nextOrder = placeUltraChatBelowFable([
+    const nextOrder = placeGemini38Before37(placeUltraChatBelowFable([
       ...menuNames,
       ...previousOrder.filter((name) => !menuSet.has(name) && name !== '울트라챗'),
-    ]);
+    ]));
     const nextInfo = Object.fromEntries(
       previousOrder
         .filter((name) => name !== '울트라챗')
@@ -1131,6 +1316,29 @@
     return cachedComposerEditable;
   }
 
+  function markComposerShell() {
+    document.querySelectorAll('.lynn-composer-shell').forEach((el) => el.classList.remove('lynn-composer-shell'));
+    const editable = findChatComposerEditable();
+    const sendButton = findBottomSendButton();
+    if (!editable) return;
+    let node = editable.parentElement;
+    let fallback = null;
+    for (let i = 0; node && node !== document.body && i < 8; i += 1) {
+      const hasSend = !sendButton || node.contains(sendButton);
+      if (!hasSend) {
+        node = node.parentElement;
+        continue;
+      }
+      fallback = fallback || node;
+      if (/rounded/.test(String(node.className || ''))) {
+        node.classList.add('lynn-composer-shell');
+        return;
+      }
+      node = node.parentElement;
+    }
+    fallback?.classList.add('lynn-composer-shell');
+  }
+
   function isComposerEmptyForSend() {
     const editable = findChatComposerEditable();
     if (!editable) return false;
@@ -1472,13 +1680,22 @@
     }) || buttons.at(-1) || null;
   }
 
+  function applyCrackModelVisibility() {
+    document.querySelectorAll('button').forEach((button) => {
+      if (!isCrackComposerModelButton(button)) return;
+      button.classList.toggle('lynn-hide-composer-control', hideCrackModel);
+    });
+  }
+
   function placeCrackModelButton() {
+    if (hideCrackModel) return;
     const row = findChatTitleActionRow();
     if (!row) return;
     const button = [...document.querySelectorAll('button')].find(isCrackComposerModelButton);
     const menu = findChatMenuButton(row);
     if (!button || !menu || button === menu) return;
-    if (button.parentElement === row && button.nextElementSibling === menu) return;
+    if (button.parentElement !== row) return;
+    if (button.nextElementSibling === menu) return;
     row.insertBefore(button, menu);
   }
 
@@ -1531,12 +1748,14 @@
     const model = [...row.children].find((child) => child instanceof HTMLButtonElement && isCrackComposerModelButton(child));
     const menu = findChatMenuButton(row);
     const before = model?.parentElement === row ? model : menu;
-    if (lore.parentElement === row && lore.nextElementSibling === before) return;
+    if (lore.parentElement !== row) return;
+    if (lore.nextElementSibling === before) return;
     row.insertBefore(lore, before || row.firstChild);
   }
 
   function ensureBottomModelPicker() {
     hideKoreanLoreButton();
+    applyCrackModelVisibility();
     placeCrackModelButton();
     placeLoreOnTitleBar();
     if (!modelBubbleEnabled) {
@@ -1955,6 +2174,10 @@
     if (chromeInput) chromeInput.checked = chromeHover;
     const barsInput = document.getElementById(ID.toggleBars);
     if (barsInput) barsInput.checked = barsHover;
+    const searchAutofillInput = document.getElementById(ID.toggleSearchAutofill);
+    if (searchAutofillInput) searchAutofillInput.checked = blockSearchAutofill;
+    const crackModelInput = document.getElementById(ID.toggleCrackModel);
+    if (crackModelInput) crackModelInput.checked = hideCrackModel;
     syncVisibleModelListOpenUi();
     refreshVisibleModelChoicesPanel();
   }
@@ -2002,8 +2225,21 @@
     return found;
   }
 
+  function alignGearToSearchBox(gear, searchBox) {
+    gear.style.transform = '';
+    const gearRect = gear.getBoundingClientRect();
+    const boxRect = searchBox.getBoundingClientRect();
+    if (gearRect.height < 1 || boxRect.height < 1) return;
+    const deltaY = (boxRect.top + boxRect.height / 2) - (gearRect.top + gearRect.height / 2);
+    const deltaX = (boxRect.left - gearRect.right) - 10;
+    const x = Math.abs(deltaX) >= 0.5 ? deltaX : 0;
+    const y = Math.abs(deltaY) >= 0.5 ? deltaY : 0;
+    if (x || y) gear.style.transform = `translate(${x}px, ${y}px)`;
+  }
+
   function placeGear(gear) {
     if (!gear) return;
+    gear.style.transform = '';
     const header = findHeader();
     const phone = window.matchMedia('(max-width: 767px)').matches;
 
@@ -2031,16 +2267,12 @@
     const input = header?.querySelector('input[placeholder*="검색"]');
     const inputWrap = input?.closest('span.relative, span[class*="relative"]') || input?.parentElement;
     const searchBox = inputWrap?.parentElement;
-    if (searchBox) {
-      let cluster = searchBox.closest('.lynn-search-cluster');
-      if (!cluster) {
-        cluster = document.createElement('div');
-        cluster.className = 'lynn-search-cluster';
-        searchBox.parentElement.insertBefore(cluster, searchBox);
-        cluster.appendChild(searchBox);
+    if (searchBox?.parentElement) {
+      if (gear.parentElement !== searchBox.parentElement || gear.nextElementSibling !== searchBox) {
+        searchBox.parentElement.insertBefore(gear, searchBox);
       }
-      if (gear.parentElement !== cluster) cluster.insertBefore(gear, cluster.firstChild);
       gear.dataset.lynnPlacement = 'header-desktop';
+      alignGearToSearchBox(gear, searchBox);
       return;
     }
 
@@ -2146,6 +2378,16 @@
               <span class="lynn-switch" aria-hidden="true"></span>
             </span>
           </label>
+          <button type="button" id="lynn-open-backup" class="lynn-row lynn-logtools-open">
+            <span class="lynn-row-name"><span class="lynn-backup-heart" aria-hidden="true">♥</span> 채팅 백업 <span class="lynn-backup-heart" aria-hidden="true">♥</span></span>
+          </button>
+          <label class="lynn-row">
+            <span class="lynn-row-name">크랙 모델 숨김</span>
+            <span class="lynn-switch-wrap">
+              <input id="${ID.toggleCrackModel}" type="checkbox">
+              <span class="lynn-switch" aria-hidden="true"></span>
+            </span>
+          </label>
           <label class="lynn-row">
             <span class="lynn-row-name">상단바 숨김</span>
             <span class="lynn-switch-wrap">
@@ -2161,15 +2403,19 @@
             </span>
           </label>
           <label class="lynn-row">
+            <span class="lynn-row-name">검색 입력 끄기</span>
+            <span class="lynn-switch-wrap">
+              <input id="${ID.toggleSearchAutofill}" type="checkbox">
+              <span class="lynn-switch" aria-hidden="true"></span>
+            </span>
+          </label>
+          <label class="lynn-row">
             <span class="lynn-row-name">줄바꿈</span>
             <span class="lynn-switch-wrap">
               <input id="${ID.toggleLineBreak}" type="checkbox">
               <span class="lynn-switch" aria-hidden="true"></span>
             </span>
           </label>
-          <button type="button" id="lynn-open-backup" class="lynn-row lynn-logtools-open">
-            <span class="lynn-row-name"><span class="lynn-backup-heart" aria-hidden="true">♥</span> 채팅 백업 <span class="lynn-backup-heart" aria-hidden="true">♥</span></span>
-          </button>
           <button type="button" id="${ID.visibleModelDisclosure}" class="lynn-disclosure" aria-expanded="false" aria-controls="${ID.visibleModelPanel}">
             <span class="lynn-row-name">표시 모델</span>
             <span class="lynn-chevron" aria-hidden="true">▾</span>
@@ -2242,6 +2488,16 @@
       writeStorage(LS.barsHover, barsHover ? '1' : '0');
       syncQuietBars();
     });
+    root.querySelector(`#${ID.toggleSearchAutofill}`).addEventListener('change', (event) => {
+      blockSearchAutofill = event.target.checked;
+      writeStorage(LS.searchAutofill, blockSearchAutofill ? '1' : '0');
+      applySearchAutofillGuard();
+    });
+    root.querySelector(`#${ID.toggleCrackModel}`).addEventListener('change', (event) => {
+      hideCrackModel = event.target.checked;
+      writeStorage(LS.crackModel, hideCrackModel ? '1' : '0');
+      ensureBottomModelPicker();
+    });
     root.querySelector('#lynn-open-backup')?.addEventListener('click', (event) => {
       event.preventDefault();
       event.stopPropagation();
@@ -2256,6 +2512,19 @@
   function addStyle() {
     const css = `
       @import url('https://fonts.googleapis.com/css2?family=Cherry+Bomb+One&display=swap');
+      @keyframes lynn-on-autofill { from { } to { } }
+      input[data-lynn-no-fill="1"]:-webkit-autofill {
+        animation-name: lynn-on-autofill;
+        animation-duration: 0.01s;
+      }
+      input[data-lynn-no-fill="1"]::-webkit-search-decoration,
+      input[data-lynn-no-fill="1"]::-webkit-search-cancel-button,
+      input[data-lynn-no-fill="1"]::-webkit-search-results-button,
+      input[data-lynn-no-fill="1"]::-webkit-search-results-decoration {
+        -webkit-appearance: none;
+        appearance: none;
+        display: none;
+      }
       .lynn-search-cluster {
         display: flex !important;
         align-items: center !important;
@@ -2266,10 +2535,11 @@
         display: inline-flex !important;
         align-items: center !important;
         justify-content: center !important;
+        align-self: center !important;
         width: 24px !important;
         height: 24px !important;
         min-width: 24px !important;
-        margin: 0 !important;
+        margin: 0 8px 0 0 !important;
         padding: 0 !important;
         border: 0 !important;
         border-radius: 0 !important;
@@ -2278,6 +2548,7 @@
         color: #f7c6dc !important;
         cursor: pointer !important;
         flex: 0 0 auto !important;
+        vertical-align: middle !important;
       }
       #${ID.gear}:hover { opacity: .72 !important; }
       #${ID.gear}[data-lynn-placement="fallback"] {
@@ -2472,15 +2743,93 @@
       .lynn-pink-composer-icon span {
         color: #f7c6dc !important;
       }
-      .lynn-suggest-chip {
+      .lynn-suggest-chip,
+      [data-message-group-id] .bg-surface_chat_secondary,
+      .lynn-composer-shell {
         border: 1px solid rgba(243, 180, 207, .55) !important;
         background: rgba(243, 180, 207, .16) !important;
         color: rgba(255, 255, 255, .94) !important;
         box-shadow: 0 0 16px rgba(243, 180, 207, .18) !important;
       }
+      .lynn-composer-shell :is(.__chat_input_textarea, .ProseMirror, .tiptap) {
+        background: transparent !important;
+        color: rgba(255, 255, 255, .94) !important;
+      }
       .lynn-suggest-edit,
       .lynn-suggest-edit svg {
         color: #f7c6dc !important;
+      }
+      button[aria-label="메시지 옵션"] {
+        color: #f7c6dc !important;
+      }
+      button[aria-label="메시지 옵션"] svg {
+        color: #f7c6dc !important;
+        filter: drop-shadow(0 0 6px rgba(243, 180, 207, .9));
+      }
+      button[aria-label="메시지 옵션"] svg :is(path, circle) {
+        fill: #f7c6dc !important;
+        stroke: #f7c6dc !important;
+      }
+      .lynn-memory-toast {
+        color: #f7c6dc !important;
+        background: transparent !important;
+        border: 0 !important;
+        box-shadow: none !important;
+        text-shadow: 0 0 8px rgba(243, 180, 207, .8);
+      }
+      .lynn-memory-toast,
+      .lynn-memory-toast * {
+        color: #f7c6dc !important;
+        background: transparent !important;
+        box-shadow: none !important;
+        text-shadow: 0 0 8px rgba(243, 180, 207, .8);
+      }
+      .lynn-memory-toast svg,
+      .lynn-memory-toast svg :is(path, circle, rect) {
+        color: #f7c6dc !important;
+        fill: #f7c6dc !important;
+        stroke: #f7c6dc !important;
+        filter: drop-shadow(0 0 6px rgba(243, 180, 207, .9));
+      }
+      .lynn-msg-menu {
+        width: max-content !important;
+        min-width: 132px !important;
+        max-width: min(240px, calc(100vw - 16px)) !important;
+        overflow: hidden !important;
+        box-sizing: border-box !important;
+        padding: 8px !important;
+        border-radius: 12px !important;
+        border: 1px solid rgba(243, 180, 207, .45) !important;
+        background: linear-gradient(145deg, rgba(243, 180, 207, .12), rgba(28, 28, 30, .96) 52%) !important;
+        color: rgba(255, 255, 255, .94) !important;
+        box-shadow: 0 14px 38px rgba(0, 0, 0, .44), 0 0 18px rgba(243, 180, 207, .08) !important;
+        backdrop-filter: blur(12px) !important;
+        font: 12px/1.3 system-ui, -apple-system, "Segoe UI", sans-serif !important;
+      }
+      [data-radix-popper-content-wrapper]:has(.lynn-msg-menu) {
+        background: transparent !important;
+        border: 0 !important;
+        box-shadow: none !important;
+      }
+      .lynn-msg-menu :is([role="menuitem"], button) {
+        display: flex !important;
+        align-items: center !important;
+        width: 100% !important;
+        min-height: 28px !important;
+        margin: 0 !important;
+        padding: 6px 8px !important;
+        border: 0 !important;
+        border-radius: 8px !important;
+        background: transparent !important;
+        color: inherit !important;
+        box-shadow: none !important;
+        font: inherit !important;
+        text-align: left !important;
+        cursor: pointer !important;
+      }
+      .lynn-msg-menu :is([role="menuitem"], button):is(:hover, :focus, [data-highlighted]) {
+        background: rgba(243, 180, 207, .2) !important;
+        color: #ffe4ef !important;
       }
       :is(body, html)[data-theme="light"] .lynn-suggest-chip {
         border-color: rgba(229, 154, 184, .85) !important;
@@ -2625,19 +2974,53 @@
       #lynn-rs .lynn-rs-item b { font-weight: 700; }
       #lynn-rs .lynn-rs-item em { font-style: normal; font-weight: 900; }
       #lynn-rs .lynn-rs-item span { opacity: .72; }
-      #lynn-rs .s-active em, #lynn-rs .s-active i { color: #3ddc84; }
-      #lynn-rs .s-degraded em, #lynn-rs .s-degraded i { color: #ffd54a; }
-      #lynn-rs .s-impacted em, #lynn-rs .s-impacted i { color: #ff5c5c; }
+      #lynn-rs .lynn-rs-split {
+        display: inline-flex; align-items: center; gap: 5px;
+        flex: 0 0 auto; margin: 0 2px; color: #f7c6dc;
+      }
+      #lynn-rs .lynn-rs-split::before,
+      #lynn-rs .lynn-rs-split::after {
+        content: ""; width: 12px; height: 1px; border-radius: 1px;
+        background: linear-gradient(90deg, transparent, rgba(247, 198, 220, .95));
+      }
+      #lynn-rs .lynn-rs-split::after {
+        background: linear-gradient(90deg, rgba(247, 198, 220, .95), transparent);
+      }
+      #lynn-rs .lynn-rs-split i {
+        width: 8px; height: 7px; flex: 0 0 auto; background: currentColor;
+        -webkit-mask: var(--lynn-heart) center / contain no-repeat;
+        mask: var(--lynn-heart) center / contain no-repeat;
+      }
+      #lynn-rs-menu .lynn-rs-menu-split {
+        display: flex; align-items: center; gap: 6px;
+        margin: 6px 4px; color: #f7c6dc;
+      }
+      #lynn-rs-menu .lynn-rs-menu-split::before,
+      #lynn-rs-menu .lynn-rs-menu-split::after {
+        content: ""; flex: 1 1 auto; height: 1px; border-radius: 1px;
+        background: linear-gradient(90deg, transparent, rgba(247, 198, 220, .7));
+      }
+      #lynn-rs-menu .lynn-rs-menu-split::after {
+        background: linear-gradient(90deg, rgba(247, 198, 220, .7), transparent);
+      }
+      #lynn-rs-menu .lynn-rs-menu-split i {
+        width: 8px; height: 7px; flex: 0 0 auto; background: currentColor;
+        -webkit-mask: var(--lynn-heart) center / contain no-repeat;
+        mask: var(--lynn-heart) center / contain no-repeat;
+      }
+      #lynn-rs .s-active em, #lynn-rs .s-active i { color: #f7c6dc; }
+      #lynn-rs .s-degraded em, #lynn-rs .s-degraded i { color: #b9c7f2; }
+      #lynn-rs .s-impacted em, #lynn-rs .s-impacted i { color: #6e6e78; }
       #lynn-rs .s-unknown em, #lynn-rs .s-unknown i { color: rgba(255, 255, 255, .45); }
       #lynn-rs .lynn-rs-refresh,
       #lynn-rs .lynn-rs-settings {
         pointer-events: auto; width: 18px; height: 18px; padding: 0;
         border: 0; border-radius: 8px; background: transparent;
-        color: inherit; opacity: .65; cursor: pointer; flex: 0 0 auto;
+        color: #f7c6dc; opacity: 1; cursor: pointer; flex: 0 0 auto;
       }
       #lynn-rs .lynn-rs-refresh:hover,
       #lynn-rs .lynn-rs-settings:hover,
-      #lynn-rs .lynn-rs-settings[aria-expanded="true"] { opacity: 1; background: rgba(255, 255, 255, .08); }
+      #lynn-rs .lynn-rs-settings[aria-expanded="true"] { opacity: 1; background: rgba(243, 180, 207, .16); }
       #lynn-rs-menu {
         position: fixed; z-index: 2147483000; box-sizing: border-box;
         width: min(240px, calc(100vw - 16px));
@@ -2695,9 +3078,9 @@
       }
       :is(body, html)[data-theme="light"] #lynn-rs { color: rgba(0, 0, 0, .85); }
       :is(body, html)[data-theme="light"] #lynn-rs .s-unknown :is(em, i) { color: rgba(0, 0, 0, .4); }
-      :is(body, html)[data-theme="light"] #lynn-rs .s-active :is(em, i) { color: #1da851; }
-      :is(body, html)[data-theme="light"] #lynn-rs .s-degraded :is(em, i) { color: #d49500; }
-      :is(body, html)[data-theme="light"] #lynn-rs .s-impacted :is(em, i) { color: #e03535; }
+      :is(body, html)[data-theme="light"] #lynn-rs .s-active :is(em, i) { color: #e59ab8; }
+      :is(body, html)[data-theme="light"] #lynn-rs .s-degraded :is(em, i) { color: #8694d4; }
+      :is(body, html)[data-theme="light"] #lynn-rs .s-impacted :is(em, i) { color: #5c5c66; }
       [role="menuitem"][data-lynn-official-model-hidden="1"],
       [role="option"][data-lynn-official-model-hidden="1"],
       button[data-lynn-official-model-hidden="1"] { display: none !important; }
@@ -2788,8 +3171,8 @@
     { slug: 'gemini-4-argon', label: 'Gemini 4 Argon', short: 'G4A' },
     { slug: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro', short: 'G3.1P' },
     { slug: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro', short: 'G2.5P' },
-    { slug: 'gemini-3.7-flash', label: 'Gemini 3.7 Flash', short: 'G3.7F' },
     { slug: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash', short: 'G3.8F' },
+    { slug: 'gemini-3.7-flash', label: 'Gemini 3.7 Flash', short: 'G3.7F' },
   ];
   const RADIOSONDE_API_BASES = [
     'https://igx-radiosonde-api-striker.b-cdn.net/v2/',
@@ -2864,20 +3247,23 @@
   }
 
   async function radiosondeFetchSimple(apiId) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 15000);
-    try {
-      return await Promise.any(RADIOSONDE_API_BASES.map(async (base) => {
+    let lastError = null;
+    for (const base of RADIOSONDE_API_BASES) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 15000);
+      try {
         const response = await fetch(`${base}simple/${encodeURIComponent(apiId)}`, {
           signal: controller.signal,
         });
         if (!response.ok) throw new Error(String(response.status));
-        return response.json();
-      }));
-    } finally {
-      clearTimeout(timer);
-      controller.abort();
+        return await response.json();
+      } catch (error) {
+        lastError = error;
+      } finally {
+        clearTimeout(timer);
+      }
     }
+    throw lastError || new Error('radiosonde');
   }
 
   function radiosondeRowFromPayload(payload) {
@@ -2912,7 +3298,19 @@
       row.textContent = '선택된 모델 없음';
       return;
     }
-    row.replaceChildren(...shown.map((model) => {
+    const nodes = [];
+    let sawEarlier = false;
+    let split = false;
+    shown.forEach((model) => {
+      if (!split && model.slug.startsWith('gemini-') && sawEarlier) {
+        const divider = document.createElement('span');
+        divider.className = 'lynn-rs-split';
+        divider.setAttribute('aria-hidden', 'true');
+        divider.innerHTML = '<i></i>';
+        nodes.push(divider);
+        split = true;
+      }
+      sawEarlier = true;
       const status = radiosondeStatus.get(model.slug) || { tone: 'unknown', score: '—', latency: '—' };
       const item = document.createElement('span');
       item.className = `lynn-rs-item s-${status.tone}`;
@@ -2921,8 +3319,9 @@
       item.querySelector('b').textContent = model.short;
       item.querySelector('em').textContent = status.score;
       if (radiosondeShowLatency) item.querySelector('span').textContent = status.latency;
-      return item;
-    }));
+      nodes.push(item);
+    });
+    row.replaceChildren(...nodes);
     track.scrollLeft = scrollLeft;
   }
 
@@ -2992,7 +3391,7 @@
     }
     if (radiosondeHasLiveData()) {
       radiosondeQuickRetries = 0;
-    } else if (isFullscreenRoute() && radiosondeQuickRetries < 2) {
+    } else if (isFullscreenRoute() && radiosondeQuickRetries < 1) {
       radiosondeQuickRetries += 1;
       clearTimeout(radiosondeRetryTimer);
       radiosondeRetryTimer = setTimeout(() => {
@@ -3049,6 +3448,13 @@
     });
     scroll.appendChild(latencyButton);
     RADIOSONDE_MODELS.forEach((model) => {
+      if (model.slug === 'gemini-4-argon') {
+        const split = document.createElement('div');
+        split.className = 'lynn-rs-menu-split';
+        split.setAttribute('aria-hidden', 'true');
+        split.innerHTML = '<i></i>';
+        scroll.appendChild(split);
+      }
       const label = document.createElement('label');
       const input = document.createElement('input');
       input.type = 'checkbox';
@@ -3264,6 +3670,59 @@
     syncSuggestedReplies();
   }
 
+  function isMessageOptionMenu(el) {
+    if (!(el instanceof HTMLElement) || el.closest('[id^="lynn-"]')) return false;
+    const text = String(el.innerText || '').replace(/\s+/g, '');
+    if (!text || text.length > 48) return false;
+    return text.includes('분기') && text.includes('수정') && text.includes('삭제');
+  }
+
+  function tagMemoryToast(node) {
+    const el = node?.nodeType === 3 ? node.parentElement : node;
+    if (!(el instanceof Element) || el.closest('[id^="lynn-"]')) return;
+    if (!(el.textContent || '').includes('요약 메모리 업데이트 완료')) return;
+    const nodes = [el, ...el.querySelectorAll('*')];
+    let best = null;
+    for (const item of nodes) {
+      if (!(item instanceof HTMLElement)) continue;
+      const text = String(item.innerText || '').replace(/\s+/g, ' ').trim();
+      if (text !== '요약 메모리 업데이트 완료') continue;
+      if (!best || best.contains(item)) best = item;
+    }
+    if (!best || best.classList.contains('lynn-memory-toast')) return;
+    const parent = best.parentElement;
+    const parentText = parent ? String(parent.innerText || '').replace(/\s+/g, ' ').trim() : '';
+    const target = parent && parentText === '요약 메모리 업데이트 완료' && !parent.closest('[id^="lynn-"]')
+      ? parent
+      : best;
+    target.classList.add('lynn-memory-toast');
+  }
+
+  function tagMessageOptionMenus() {
+    document.querySelectorAll('[role="menu"], [data-radix-menu-content], [data-radix-popper-content-wrapper]').forEach((el) => {
+      if (!(el instanceof HTMLElement)) return;
+      const menu = el.getAttribute('role') === 'menu' || el.hasAttribute('data-radix-menu-content')
+        ? el
+        : (el.querySelector('[role="menu"], [data-radix-menu-content]') || el);
+      if (!(menu instanceof HTMLElement) || menu.classList.contains('lynn-msg-menu')) return;
+      if (menu.querySelector('[role="menu"], [data-radix-menu-content]')) return;
+      if (!isMessageOptionMenu(menu)) return;
+      menu.classList.add('lynn-msg-menu');
+    });
+  }
+
+  let messageMenuTagQueued = false;
+
+  function queueMessageOptionMenus() {
+    tagMessageOptionMenus();
+    if (messageMenuTagQueued) return;
+    messageMenuTagQueued = true;
+    requestAnimationFrame(() => {
+      messageMenuTagQueued = false;
+      tagMessageOptionMenus();
+    });
+  }
+
   function syncSuggestedReplies() {
     document.querySelectorAll('button[aria-label="답변 수정"]').forEach((edit) => {
       if (!(edit instanceof HTMLElement) || edit.closest('[data-message-group-id]')) return;
@@ -3289,7 +3748,9 @@
     syncOfficialModelVisibility();
     applyEmptySendGuardState();
     applyChromeHover();
+    applySearchAutofillGuard();
     syncComposerControls();
+    markComposerShell();
   }
 
   function runInit() {
@@ -3323,6 +3784,7 @@
     document.addEventListener('pointerdown', guardEmptyComposerSendEvent, true);
     document.addEventListener('mousedown', guardEmptyComposerSendEvent, true);
     document.addEventListener('click', (event) => {
+      if (event.target?.closest?.('button[aria-label="메시지 옵션"]')) queueMessageOptionMenus();
       guardEmptyComposerSendEvent(event);
       if (event.defaultPrevented) return;
       const popup = document.getElementById(ID.bottomModelPopup);
@@ -3376,6 +3838,14 @@
       if (onlyComposer) {
         if (emptySendGuard) scheduleEmptySendGuardUiUpdate();
         return;
+      }
+      queueMessageOptionMenus();
+      for (const mutation of mutations) {
+        for (const node of mutation.addedNodes) {
+          if (node.nodeType !== 1 && node.nodeType !== 3) continue;
+          if (!(node.textContent || '').includes('요약 메모리 업데이트 완료')) continue;
+          tagMemoryToast(node);
+        }
       }
       scheduleInit();
     });
